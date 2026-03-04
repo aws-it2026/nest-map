@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Wing Airspace Outreach</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Arial, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        
+        #sidebar { width: 350px; background: #fff; border-right: 1px solid #ddd; display: flex; flex-direction: column; z-index: 10; }
+        
+        .sidebar-header { padding: 20px; background: #1a252f; color: white; border-bottom: 4px solid #3498db; }
+        
+        /* Scrollable Nest Area */
+        #nest-scroll-container { flex-grow: 1; overflow-y: auto; border-bottom: 2px solid #ddd; }
+        
+        /* Fixed Conflict Area at Bottom */
+        #conflict-fixed-container { background: #fff9f0; padding-bottom: 20px; border-top: 1px solid #eee; }
+        
+        .state-section { border-bottom: 1px solid #eee; }
+        .state-header { padding: 12px 20px; background: #f8f9fa; cursor: pointer; font-weight: bold; display: flex; justify-content: space-between; align-items: center; border-top: 1px solid #ddd; color: #2c3e50; }
+        .state-content { display: none; padding: 10px 0; background: #fff; }
+        .state-content.open { display: block; }
+        
+        .nest-item { padding: 8px 35px; color: #2980b9; font-weight: bold; cursor: pointer; font-size: 13px; border-left: 3px solid transparent; transition: 0.2s; }
+        .nest-item:hover { background: #eaf2f8; border-left: 3px solid #3498db; }
+        .nest-item.active-selection { background: #fff7e6; border-left: 3px solid #f39c12; color: #d35400; }
+        
+        .raw-section-title { padding: 15px 20px 5px 20px; font-size: 14px; font-weight: bold; color: #d35400; text-transform: uppercase; display: block; }
+        .raw-item { padding: 8px 25px; font-size: 13px; display: flex; align-items: center; color: #444; cursor: pointer; }
+        .raw-item:hover { background: #fdf2e9; }
+        .raw-item input { margin-right: 12px; transform: scale(1.2); }
+        
+        #map { flex-grow: 1; position: relative; }
+        .nest-marker { cursor: pointer; border: 2px solid white; border-radius: 50%; width: 24px; height: 24px; box-shadow: 0 0 10px rgba(0,0,0,0.5); }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="sidebar-header">
+        <h2 style="margin:0; font-size: 18px;">Wing Airspace Outreach</h2>
+        <small style="opacity:0.8;">Regional Conflict Matrix</small>
+    </div>
+
+    <!-- Scrollable Nest List -->
+    <div id="nest-scroll-container">
+        <div id="accordion-container">
+            <p style="padding:20px; color:#999;">Loading USA Nests...</p>
+        </div>
+    </div>
+
+    <!-- Fixed Conflict Toggles -->
+    <div id="conflict-fixed-container">
+        <span class="raw-section-title">Conflict Areas (RAW)</span>
+        <div class="raw-item"><input type="checkbox"> Helicopter</div>
+        <div class="raw-item"><input type="checkbox"> Hot Balloon</div>
+        <div class="raw-item"><input type="checkbox"> Paragliding</div>
+        <div class="raw-item"><input type="checkbox"> Drone Ops</div>
+    </div>
+</div>
+
+<div id="map"></div>
+
+<script>
+    const ACCESS_TOKEN = 'pk.eyJ1Ijoiam1hdGxiMTcyIiwiYSI6ImNtbWI3NG14ZDBtc20ycG9sZGVwZWhsZmYifQ.NBMR1a8v6ADtwFlTNZlgJw';
+    const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyBJflyAq5hg0MhQ1UNH79H3kBL7rZG4IDQQv8xQqq7HVOPy_B21KJRt2CiZBmGDq4VBg/exec';
+    const FAA_URL = "https://services6.arcgis.com/ssUayPoYpobmXvAe/arcgis/rest/services/US_Airport_Facilities/FeatureServer/0/query?where=1%3D1&outFields=FULLNAME,TYPE_CODE,STATE_CODE&f=geojson";
+
+    mapboxgl.accessToken = ACCESS_TOKEN;
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/satellite-streets-v12',
+        center: [-84.3880, 33.7490],
+        zoom: 7
+    });
+
+    const activePopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: false });
+    let allNests = [];
+    let faaData = null;
+
+    map.on('load', () => {
+        fetch(FAA_URL).then(r => r.json()).then(data => {
+            faaData = data;
+            map.addSource('faa-all', { type: 'geojson', data: data });
+            map.addLayer({
+                id: 'faa-layer', type: 'circle', source: 'faa-all',
+                paint: { 'circle-radius': 5, 'circle-color': '#e74c3c', 'circle-stroke-width': 1.5, 'circle-stroke-color': '#fff' }
+            });
+        });
+
+        fetch(SCRIPT_URL + '?t=' + Date.now()).then(r => r.json()).then(data => {
+            allNests = data;
+            buildSidebar();
+            renderNestsOnMap();
+        });
+    });
+
+    function buildSidebar() {
+        const container = document.getElementById('accordion-container');
+        container.innerHTML = ''; 
+        
+        const states = [...new Set(allNests.map(d => d.State || "USA Nests"))].sort();
+
+        states.forEach(stateName => {
+            const section = document.createElement('div');
+            section.className = 'state-section';
+            
+            const header = document.createElement('div');
+            header.className = 'state-header';
+            header.innerHTML = `<span>${stateName}</span> <span>▾</span>`;
+            
+            const content = document.createElement('div');
+            content.className = 'state-content';
+            content.id = `content-${stateName.replace(/\s/g, '')}`;
+
+            allNests.filter(n => (n.State || "USA Nests") === stateName).forEach(nest => {
+                const nItem = document.createElement('div');
+                nItem.className = 'nest-item';
+                nItem.id = `item-${nest.Nest_Name.replace(/[^a-zA-Z0-9]/g, '')}`;
+                nItem.innerText = nest.Nest_Name || "Unnamed Nest";
+                nItem.onclick = () => {
+                    map.flyTo({ center: [nest.Longitude, nest.Latitude], zoom: 12 });
+                    triggerScan([nest.Longitude, nest.Latitude], nest.Nest_Name, stateName);
+                };
+                content.appendChild(nItem);
+            });
+
+            header.onclick = () => content.classList.toggle('open');
+            section.append(header, content);
+            container.appendChild(section);
+        });
+    }
+
+    function renderNestsOnMap() {
+        allNests.forEach(nest => {
+            if (!nest.Latitude || !nest.Longitude) return;
+            const el = document.createElement('div');
+            el.className = 'nest-marker';
+            el.style.backgroundColor = nest.Status === 'Active' ? '#2ecc71' : '#3498db';
+            new mapboxgl.Marker(el).setLngLat([nest.Longitude, nest.Latitude]).addTo(map);
+            
+            el.onclick = (e) => {
+                e.stopPropagation();
+                map.flyTo({ center: [nest.Longitude, nest.Latitude], zoom: 12 });
+                triggerScan([nest.Longitude, nest.Latitude], nest.Nest_Name, nest.State);
+            };
+        });
+    }
+
+    function triggerScan(coords, name, state) {
+        if (map.getLayer('scan-zone')) { map.removeLayer('scan-zone'); map.removeSource('scan-zone'); }
+        map.addSource('scan-zone', { type: 'geojson', data: turf.circle(coords, 6, {units: 'miles'}) });
+        map.addLayer({
+            'id': 'scan-zone', 'type': 'fill', 'source': 'scan-zone', 'paint': { 'fill-color': '#f1c40f', 'fill-opacity': 0.25 }
+        });
+
+        let conflicts = 0;
+        if (faaData) {
+            faaData.features.forEach(f => {
+                if (turf.distance(coords, f.geometry.coordinates, {units: 'miles'}) <= 6) conflicts++;
+            });
+        }
+
+        activePopup.remove();
+        activePopup.setLngLat(coords).setHTML(`
+            <div style="padding:10px; color:#333;">
+                <b style="font-size:14px;">${name}</b><hr>
+                <span style="color:#e74c3c; font-weight:bold;">${conflicts} FAA Conflicts Detected</span><br>
+                <small>Within 6-mile radius</small>
+            </div>
+        `).addTo(map);
+
+        syncSidebar(name, state);
+    }
+
+    function syncSidebar(nestName, stateName) {
+        const safeState = (stateName || "USA Nests").replace(/\s/g, '');
+        const safeNest = nestName.replace(/[^a-zA-Z0-9]/g, '');
+
+        const content = document.getElementById(`content-${safeState}`);
+        if (content) content.classList.add('open');
+
+        document.querySelectorAll('.nest-item').forEach(el => el.classList.remove('active-selection'));
+        const nestEl = document.getElementById(`item-${safeNest}`);
+        if (nestEl) {
+            nestEl.classList.add('active-selection');
+            nestEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+    }
+</script>
+</body>
+</html>
