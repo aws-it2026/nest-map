@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Wing Nest Airspace Platform</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <script src="https://api.mapbox.com/search-js/v1.0.0-beta.18/web.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.0/papaparse.min.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; }
+        #map { position: absolute; top: 0; bottom: 0; width: 100%; height: 100vh; }
+        .legend { 
+            background: rgba(255, 255, 255, 0.95); 
+            padding: 15px; 
+            position: absolute; 
+            bottom: 30px; 
+            left: 10px; 
+            border-radius: 8px; 
+            box-shadow: 0 0 15px rgba(0,0,0,0.3); 
+            z-index: 1; 
+            font-family: sans-serif; 
+            border: 1px solid #333;
+        }
+        .legend div { margin-bottom: 8px; font-size: 13px; font-weight: bold; display: flex; align-items: center; }
+        .dot { height: 12px; width: 12px; display: inline-block; border-radius: 50%; margin-right: 10px; border: 1px solid #333; }
+        .nest-marker { 
+            cursor: pointer; 
+            border: 3px solid white; 
+            box-shadow: 0 0 10px rgba(0,0,0,0.8); 
+            border-radius: 50%;
+            width: 20px;
+            height: 20px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="legend">
+    <div style="font-size: 15px; border-bottom: 1px solid #ccc; padding-bottom: 5px; margin-bottom: 10px;">Wing Nest Status</div>
+    <div><span class="dot" style="background: #2ecc71;"></span> Active Nest</div>
+    <div><span class="dot" style="background: #3498db;"></span> Scheduled Nest</div>
+    <div><span class="dot" style="background: #e74c3c;"></span> FAA Airport/Heliport</div>
+    <div style="font-weight: normal; font-size: 11px; color: #666; margin-top: 5px;">Click Nest for 6-mile conflict scan</div>
+</div>
+
+<script>
+    const ACCESS_TOKEN = 'pk.eyJ1Ijoiam1hdGxiMTcyIiwiYSI6ImNtbWI3NG14ZDBtc20ycG9sZGVwZWhsZmYifQ.NBMR1a8v6ADtwFlTNZlgJw';
+    mapboxgl.accessToken = ACCESS_TOKEN;
+
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/satellite-streets-v12',
+        center: [-84.3880, 33.7490], 
+        zoom: 9
+    });
+
+    const searchBox = new MapboxSearchBox();
+    searchBox.accessToken = ACCESS_TOKEN;
+    searchBox.mapboxgl = mapboxgl;
+    map.addControl(searchBox, 'top-left');
+
+    const csvUrl = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vRli04gPcnTL6awSpf8_X4HXptT6YO-YkKUO7ewOSkgeyT5HbH3OD3rFd7geSfHIQ/pub?output=csv';
+
+    let faaData = null;
+
+    function cleanCoord(val) {
+        if (!val) return NaN;
+        let cleaned = val.toString().replace(/[^0-9.\-]/g, "");
+        return parseFloat(cleaned);
+    }
+
+    map.on('style.load', () => {
+        fetch('https://services6.arcgis.com/ssUayPoYpobmXvAe/arcgis/rest/services/US_Airport_Facilities/FeatureServer/0/query?outFields=FULLNAME,TYPE_CODE&where=1%3D1&f=geojson')
+            .then(res => res.json())
+            .then(data => {
+                faaData = data;
+                map.addSource('faa-src', { type: 'geojson', data: data });
+                map.addLayer({
+                    'id': 'faa-layer',
+                    'type': 'circle',
+                    'source': 'faa-src',
+                    'paint': {
+                        'circle-radius': 5,
+                        'circle-color': '#e74c3c',
+                        'circle-stroke-width': 1.5,
+                        'circle-stroke-color': '#fff'
+                    }
+                });
+            });
+
+        Papa.parse(csvUrl + "&t=" + new Date().getTime(), {
+            download: true,
+            header: true,
+            skipEmptyLines: true,
+            complete: function(results) {
+                const bounds = new mapboxgl.LngLatBounds();
+                results.data.forEach(nest => {
+                    const lat = cleanCoord(nest.Latitude); 
+                    const lng = cleanCoord(nest.Longitude);
+                    const name = nest.Nest_Name || "Unnamed Nest";
+
+                    if (isNaN(lat) || isNaN(lng)) return;
+                    bounds.extend([lng, lat]);
+
+                    const el = document.createElement('div');
+                    el.className = 'nest-marker';
+                    el.style.backgroundColor = (nest.Status === 'Active' ? '#2ecc71' : '#3498db');
+
+                    new mapboxgl.Marker(el)
+                        .setLngLat([lng, lat])
+                        .addTo(map);
+
+                    el.addEventListener('click', () => {
+                        drawConflictZone([lng, lat], name);
+                    });
+                });
+                if (!bounds.isEmpty()) map.fitBounds(bounds, { padding: 80 });
+            }
+        });
+    });
+
+    function drawConflictZone(centerCoords, nestName) {
+        if (map.getLayer('circle-fill')) {
+            map.removeLayer('circle-fill');
+            map.removeSource('circle-source');
+        }
+        const circle = turf.circle(centerCoords, 6, {units: 'miles'});
+        map.addSource('circle-source', { 'type': 'geojson', 'data': circle });
+        map.addLayer({
+            'id': 'circle-fill',
+            'type': 'fill',
+            'source': 'circle-source',
+            'paint': { 'fill-color': '#f1c40f', 'fill-opacity': 0.3 }
+        });
+        let conflicts = 0;
+        if (faaData) {
+            faaData.features.forEach(f => {
+                const dist = turf.distance(centerCoords, f.geometry.coordinates, {units: 'miles'});
+                if (dist <= 6) conflicts++;
+            });
+        }
+        new mapboxgl.Popup()
+            .setLngLat(centerCoords)
+            .setHTML(`<strong>${nestName}</strong><br>6-mile scan: <b>${conflicts}</b> FAA conflicts detected.`)
+            .addTo(map);
+        map.flyTo({ center: centerCoords, zoom: 11 });
+    }
+</script>
+</body>
+</html>
