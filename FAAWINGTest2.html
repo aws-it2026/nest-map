@@ -1,0 +1,278 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>Wing Flight Ops - Airspace Conflict Manager</title>
+    <meta name="viewport" content="initial-scale=1,maximum-scale=1,user-scalable=no">
+    
+    <link href="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.css" rel="stylesheet">
+    <script src="https://api.mapbox.com/mapbox-gl-js/v2.15.0/mapbox-gl.js"></script>
+    <script src="https://maps.googleapis.com/maps/api/js?key=AIzaSyANgEnxeaelhNMm6W5jS2iyiLG4ZEht8P8&libraries=places"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@turf/turf@6/turf.min.js"></script>
+
+    <style>
+        body { margin: 0; padding: 0; font-family: 'Helvetica Neue', Arial, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+        #sidebar { width: 350px; background: #fff; border-right: 1px solid #ddd; display: flex; flex-direction: column; z-index: 10; }
+        .sidebar-header { padding: 20px; background: #1a252f; color: white; border-bottom: 4px solid #3498db; }
+        .sidebar-header h2 { margin: 0; font-size: 18px; color: white !important; }
+        .sidebar-header small { opacity: 0.8; color: white !important; display: block; margin-top: 2px; }
+
+        #search-area { padding: 15px; background: #f4f4f4; border-bottom: 1px solid #ddd; }
+        #google-search { width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; font-size: 14px; outline: none; box-sizing: border-box; }
+
+        #main-content-scroll { flex-grow: 1; overflow-y: auto; }
+        #google-results-container { background: #fff; border-bottom: 2px solid #eee; display: none; }
+        .poi-result-item { padding: 12px 20px; border-bottom: 1px solid #f0f0f0; cursor: pointer; }
+
+        .state-header { padding: 12px 20px; background: #f8f9fa; cursor: pointer; font-weight: bold; display: flex; justify-content: space-between; border-top: 1px solid #ddd; color: #2c3e50; }
+        .state-content { display: none; padding: 5px 0; background: #fff; }
+        .state-content.open { display: block; }
+        .nest-item { padding: 8px 35px; color: #2980b9; font-weight: bold; cursor: pointer; font-size: 13px; border-left: 3px solid transparent; }
+        .nest-item.active-selection { background: #fff7e6; border-left: 3px solid #f39c12; color: #d35400; }
+
+        #conflict-fixed-container { background: #fff9f0; padding: 15px 0; border-top: 2px solid #eee; }
+        .conflict-label { padding: 0 20px 10px 20px; font-size: 13px; font-weight: bold; color: #d35400; text-transform: uppercase; display: block; }
+        .conflict-item { padding: 6px 25px; font-size: 12px; display: flex; align-items: center; gap: 10px; }
+
+        #map { flex-grow: 1; position: relative; }
+        
+        /* FLOATING MAP UI */
+        #floating-search-btn {
+            position: absolute; top: 20px; left: 50%; transform: translateX(-50%);
+            z-index: 15; background: white; border: none; padding: 10px 20px;
+            border-radius: 25px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            font-weight: bold; cursor: pointer; display: none; align-items: center; gap: 8px; font-size: 14px; color: #1a73e8;
+        }
+
+        #traffic-hover-control {
+            position: absolute; top: 20px; right: 20px; z-index: 15;
+            background: rgba(255, 255, 255, 0.95); padding: 10px 15px;
+            border-radius: 12px; box-shadow: 0 2px 10px rgba(0,0,0,0.2);
+            display: flex; align-items: center; gap: 12px; backdrop-filter: blur(4px);
+        }
+
+        .nest-marker { cursor: pointer; border: 2px solid white; border-radius: 50%; width: 22px; height: 22px; box-shadow: 0 0 8px rgba(0,0,0,0.4); z-index: 5; }
+        .plane-icon { background-size: contain; width: 24px; height: 24px; cursor: pointer; filter: drop-shadow(0 2px 2px rgba(0,0,0,0.5)); }
+        .google-poi-marker { background-color: #ea4335; border: 2px solid white; border-radius: 50%; width: 14px; height: 14px; cursor: pointer; }
+
+        /* TOGGLE & PULSE */
+        .switch { position: relative; display: inline-block; width: 34px; height: 20px; }
+        .switch input { opacity: 0; width: 0; height: 0; }
+        .slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; transition: .4s; border-radius: 34px; }
+        .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background-color: white; transition: .4s; border-radius: 50%; }
+        input:checked + .slider { background-color: #2ecc71; }
+        input:checked + .slider:before { transform: translateX(14px); }
+        .pulse-red { width: 8px; height: 8px; background: #e74c3c; border-radius: 50%; display: inline-block; animation: pulse-animation 1.5s infinite; }
+        @keyframes pulse-animation { 0% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(231, 76, 60, 0.7); } 70% { transform: scale(1); box-shadow: 0 0 0 6px rgba(231, 76, 60, 0); } 100% { transform: scale(0.95); box-shadow: 0 0 0 0 rgba(231, 76, 60, 0); } }
+
+        /* POPUP CARD */
+        .mapboxgl-popup-content { padding: 0 !important; border-radius: 12px !important; overflow: hidden !important; width: 280px !important; border: none !important; box-shadow: 0 10px 30px rgba(0,0,0,0.3) !important; }
+        @keyframes pulse-green { 0% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(46, 204, 113, 0); } 100% { box-shadow: 0 0 0 0 rgba(46, 204, 113, 0); } }
+    </style>
+</head>
+<body>
+
+<div id="sidebar">
+    <div class="sidebar-header">
+        <h2>Wing Airspace Outreach</h2>
+        <small>Wing Flight Operations</small>
+    </div>
+    <div id="search-area"><input id="google-search" type="text" placeholder="Search for conflicts..."></div>
+    <div id="main-content-scroll">
+        <div id="google-results-container"></div>
+        <div id="accordion-container"></div>
+    </div>
+    <div id="conflict-fixed-container">
+        <span class="conflict-label">Conflict Areas (RAW)</span>
+        <div class="conflict-item"><input type="checkbox"> Helicopter</div>
+        <div class="conflict-item"><input type="checkbox"> Hot Balloon</div>
+    </div>
+</div>
+
+<div id="map">
+    <button id="floating-search-btn">🔍 Search this area</button>
+    
+    <div id="traffic-hover-control">
+        <span style="font-size: 11px; font-weight: bold; color: #2c3e50; display: flex; align-items: center; gap: 6px;">
+            <span id="live-indicator" style="display:none;" class="pulse-red"></span> LIVE TRAFFIC
+        </span>
+        <label class="switch">
+            <input type="checkbox" id="traffic-toggle">
+            <span class="slider"></span>
+        </label>
+    </div>
+</div>
+
+<script>
+    const MB_TOKEN = 'pk.eyJ1Ijoiam1hdGxiMTcyIiwiYSI6ImNtbWI3NG14ZDBtc20ycG9sZGVwZWhsZmYifQ.NBMR1a8v6ADtwFlTNZlgJw';
+    const SCRIPT_URL = 'https://script.google.com/macros/s/AKfycbyBJflyAq5hg0MhQ1UNH79H3kBL7rZG4IDQQv8xQqq7HVOPy_B21KJRt2CiZBmGDq4VBg/exec';
+
+    mapboxgl.accessToken = MB_TOKEN;
+    const map = new mapboxgl.Map({
+        container: 'map',
+        style: 'mapbox://styles/mapbox/satellite-streets-v12',
+        center: [-84.3880, 33.7490],
+        zoom: 10
+    });
+
+    let allNests = [];
+    let livePlanes = {}; 
+    let poiMarkers = [];
+    let trafficInterval;
+    const activePopup = new mapboxgl.Popup({ closeButton: true, closeOnClick: false, offset: 20 });
+
+    // --- GOOGLE SEARCH ---
+    const searchBtn = document.getElementById('floating-search-btn');
+    const resultsContainer = document.getElementById('google-results-container');
+    map.on('moveend', () => { searchBtn.style.display = 'flex'; });
+
+    searchBtn.onclick = () => {
+        const query = document.getElementById('google-search').value || 'flight school';
+        const center = map.getCenter();
+        const service = new google.maps.places.PlacesService(document.createElement('div'));
+        
+        service.nearbySearch({
+            location: new google.maps.LatLng(center.lat, center.lng),
+            radius: 15000,
+            keyword: query
+        }, (results, status) => {
+            if (status === google.maps.places.PlacesServiceStatus.OK) {
+                poiMarkers.forEach(m => m.remove());
+                poiMarkers = [];
+                resultsContainer.innerHTML = '<div style="padding:10px 20px; font-weight:bold; font-size:12px; color:#5f6368;">SEARCH RESULTS</div>';
+                resultsContainer.style.display = 'block';
+
+                results.forEach(place => {
+                    const el = document.createElement('div'); el.className = 'google-poi-marker';
+                    const m = new mapboxgl.Marker(el).setLngLat([place.geometry.location.lng(), place.geometry.location.lat()]).addTo(map);
+                    poiMarkers.push(m);
+
+                    const item = document.createElement('div');
+                    item.className = 'poi-result-item';
+                    item.innerHTML = `<span style="font-weight:bold; color:#1a73e8; font-size:13px;">${place.name}</span><br><span style="color:#5f6368; font-size:11px;">${place.vicinity}</span>`;
+                    item.onclick = () => map.flyTo({ center: [place.geometry.location.lng(), place.geometry.location.lat()], zoom: 14 });
+                    resultsContainer.appendChild(item);
+                });
+                searchBtn.style.display = 'none';
+            }
+        });
+    };
+
+    // --- LIVE TRAFFIC ---
+    document.getElementById('traffic-toggle').onchange = function(e) {
+        const indicator = document.getElementById('live-indicator');
+        if (e.target.checked) {
+            indicator.style.display = 'inline-block';
+            updateTraffic();
+            trafficInterval = setInterval(updateTraffic, 10000);
+        } else {
+            indicator.style.display = 'none';
+            clearInterval(trafficInterval);
+            Object.values(livePlanes).forEach(p => p.remove());
+            livePlanes = {};
+        }
+    };
+
+    function updateTraffic() {
+        const bounds = map.getBounds();
+        const url = `https://opensky-network.org/api/states/all?lamin=${bounds.getSouth()}&lomin=${bounds.getWest()}&lamax=${bounds.getNorth()}&lomax=${bounds.getEast()}`;
+        fetch(url).then(r => r.json()).then(data => {
+            if (!data.states) return;
+            data.states.forEach(s => {
+                const [icao, callsign, country, time, last, lon, lat, baro, ground, velocity, heading] = s;
+                if (!lat || !lon) return;
+                if (livePlanes[icao]) {
+                    livePlanes[icao].setLngLat([lon, lat]);
+                } else {
+                    const el = document.createElement('div');
+                    el.className = 'plane-icon';
+                    el.style.backgroundImage = 'url("https://img.icons8.com/m_rounded/50/FFFFFF/fighter-jet.png")';
+                    el.style.transform = `rotate(${heading || 0}deg)`;
+                    livePlanes[icao] = new mapboxgl.Marker(el).setLngLat([lon, lat]).addTo(map);
+                }
+            });
+        });
+    }
+
+    // --- NESTS & POPUP ---
+    map.on('load', () => {
+        fetch(SCRIPT_URL).then(r => r.json()).then(data => {
+            allNests = data;
+            buildSidebar();
+            data.forEach(nest => {
+                const el = document.createElement('div'); el.className = 'nest-marker';
+                el.style.backgroundColor = (nest.Status || "").toLowerCase() === 'active' ? '#2ecc71' : '#3498db';
+                new mapboxgl.Marker(el).setLngLat([nest.Longitude, nest.Latitude]).addTo(map).getElement().onclick = (e) => {
+                    e.stopPropagation();
+                    selectNest(nest);
+                };
+            });
+        });
+    });
+
+    function selectNest(nest) {
+        const coords = [nest.Longitude, nest.Latitude];
+        map.flyTo({ center: coords, zoom: 12, pitch: 60 });
+        drawCylinder(nest);
+
+        const isScheduled = (nest.Status || "").toLowerCase().includes('sched');
+        const badgeColor = isScheduled ? '#3498db' : '#2ecc71';
+        const pulse = isScheduled ? '' : 'animation: pulse-green 1.5s infinite;';
+
+        activePopup.setLngLat(coords).setHTML(`
+            <div style="background:#1a252f; padding:15px; color:white;"><div style="font-size:14px; font-weight:bold;">${nest.Nest_Name}</div></div>
+            <div style="padding:20px; background:white;">
+                <div style="display:flex; align-items:center; color:${badgeColor}; font-weight:bold; font-size:11px; text-transform:uppercase; margin-bottom:12px;">
+                    <span style="height:10px; width:10px; background:${badgeColor}; border-radius:50%; display:inline-block; margin-right:10px; ${pulse}"></span>
+                    ${isScheduled ? 'Scheduled' : 'Active'}
+                </div>
+                <div style="background:#f9f9f9; padding:10px; border-radius:6px; font-size:11px; color:#7f8c8d; display:flex; justify-content:space-between; font-weight:bold;">
+                    <span>6-MI RADIUS</span><span>1200FT CEILING</span>
+                </div>
+            </div>
+        `).addTo(map);
+        syncSidebar(nest);
+    }
+
+    function drawCylinder(nest) {
+        const coords = [nest.Longitude, nest.Latitude];
+        ['scan-top-rim', 'scan-body'].forEach(l => { if (map.getLayer(l)) map.removeLayer(l); });
+        ['body-source', 'rim-source'].forEach(s => { if (map.getSource(s)) map.removeSource(s); });
+        const circle = turf.circle(coords, 6, {units: 'miles'});
+        const rim = turf.buffer(turf.lineString(circle.geometry.coordinates[0]), 60, {units: 'meters'});
+        map.addSource('body-source', { type: 'geojson', data: circle });
+        map.addSource('rim-source', { type: 'geojson', data: rim });
+        map.addLayer({ 'id': 'scan-body', 'type': 'fill-extrusion', 'source': 'body-source', 'paint': { 'fill-extrusion-color': '#f1c40f', 'fill-extrusion-height': 366, 'fill-extrusion-opacity': 0.25 } });
+        map.addLayer({ 'id': 'scan-top-rim', 'type': 'fill-extrusion', 'source': 'rim-source', 'paint': { 'fill-extrusion-color': '#e74c3c', 'fill-extrusion-height': 368, 'fill-extrusion-base': 364, 'fill-extrusion-opacity': 1 } });
+    }
+
+    function buildSidebar() {
+        const container = document.getElementById('accordion-container');
+        const states = [...new Set(allNests.map(d => d.State || "USA Nests"))].sort();
+        states.forEach(state => {
+            const section = document.createElement('div');
+            const header = document.createElement('div'); header.className = 'state-header';
+            header.innerHTML = `<span>${state}</span> <span>▾</span>`;
+            const content = document.createElement('div'); content.className = 'state-content'; content.id = `content-${state.replace(/\s/g, '')}`;
+            allNests.filter(n => (n.State || "USA Nests") === state).forEach(nest => {
+                const nItem = document.createElement('div'); nItem.className = 'nest-item'; nItem.id = `item-${nest.Nest_Name.replace(/[^a-zA-Z0-9]/g, '')}`;
+                nItem.innerText = nest.Nest_Name; nItem.onclick = () => selectNest(nest);
+                content.appendChild(nItem);
+            });
+            header.onclick = () => content.classList.toggle('open');
+            section.append(header, content); container.appendChild(section);
+        });
+    }
+
+    function syncSidebar(nest) {
+        const safeState = (nest.State || "USA Nests").replace(/\s/g, '');
+        const safeNest = nest.Nest_Name.replace(/[^a-zA-Z0-9]/g, '');
+        const content = document.getElementById(`content-${safeState}`);
+        if (content) content.classList.add('open');
+        document.querySelectorAll('.nest-item').forEach(el => el.classList.remove('active-selection'));
+        const nestEl = document.getElementById(`item-${safeNest}`);
+        if (nestEl) { nestEl.classList.add('active-selection'); nestEl.scrollIntoView({ behavior: 'smooth', block: 'center' }); }
+    }
+</script>
+</body>
+</html>
